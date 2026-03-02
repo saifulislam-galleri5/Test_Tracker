@@ -104,7 +104,7 @@
         </div>
         <div class="card" style="border-top-color: #FFDAC1;">
             <h3>World/Locs</h3>
-            <div class="number" id="card-wd">0 / 104</div>
+            <div class="number" id="card-wd">0 / 0</div>
             <div class="target" id="target-wd">Req: 0</div>
         </div>
         <div class="card" style="border-top-color: #FDFD96;">
@@ -212,11 +212,9 @@
     </div>
 
     <script>
-        // Set Today's Date
         const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
         document.getElementById('dynamicDate').innerText = new Date().toLocaleDateString('en-US', options);
         
-        // Date Parsing Helper
         function isDatePastOrToday(dateStr) {
             if (!dateStr || dateStr.trim() === "") return false;
             let parseStr = dateStr;
@@ -251,7 +249,6 @@
             }
         }
 
-        // LIVE GOOGLE SHEETS LINKS
         const scenesCsvUrl = "https://docs.google.com/spreadsheets/d/1Cy8dojw8UT5NlbfPNYyYa_kt8UwqI9XGwDBu7h27nIM/export?format=csv&gid=0"; 
         const assetsCsvUrl = "https://docs.google.com/spreadsheets/d/1Cy8dojw8UT5NlbfPNYyYa_kt8UwqI9XGwDBu7h27nIM/export?format=csv&gid=366020038"; 
         const locationsCsvUrl = "https://docs.google.com/spreadsheets/d/1Cy8dojw8UT5NlbfPNYyYa_kt8UwqI9XGwDBu7h27nIM/export?format=csv&gid=564966340"; 
@@ -282,7 +279,6 @@
             return `<span class="status-badge status-pending">${text}</span>${dateHtml}`;
         }
 
-        // NEW: Auto-Aggregation for Parent Rows
         function getAggregatedBadgeHTML(shots, columnName, isGate = false) {
             if (!shots || shots.length === 0) return `<span class="status-badge status-pending">-</span>`;
             
@@ -312,13 +308,10 @@
                 return `<span class="status-badge status-pending">-</span>`; 
             }
 
-            if (isGate) {
-                return `<span class="gate ${badgeClass}">${statusText}</span>`;
-            }
+            if (isGate) return `<span class="gate ${badgeClass}">${statusText}</span>`;
             return `<span class="status-badge ${badgeClass}">${statusText}</span>`;
         }
 
-        // Initialize Bar Chart
         const ctxBar = document.getElementById('pipelineBarChart').getContext('2d');
         window.pipelineChart = new Chart(ctxBar, {
             type: 'bar',
@@ -332,7 +325,6 @@
             options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, scales: { y: { beginAtZero: true, grid: { color: '#f1f3f5' } }, x: { grid: { display: false } } }, plugins: { title: { display: true, text: 'Required Target (By Today) vs. Actually Completed', font: { size: 14, weight: 'bold'}, color: '#2c3e50', padding: {bottom: 15} } } }
         });
 
-        // Initialize Pie Chart
         const ctxPie = document.getElementById('assetPieChart').getContext('2d');
         window.assetChart = new Chart(ctxPie, {
             type: 'doughnut',
@@ -351,37 +343,126 @@
             window.assetChart.update();
         }
 
-        // 1. Fetch Scenes and Shots Data
-        Papa.parse(scenesCsvUrl, {
-            download: true, header: true,
-            complete: function(results) {
+        // Promisify PapaParse for strict execution order
+        function fetchCSV(url) {
+            return new Promise((resolve, reject) => {
+                Papa.parse(url, { download: true, header: true, complete: results => resolve(results.data), error: err => reject(err) });
+            });
+        }
+
+        async function buildDashboard() {
+            try {
+                const [scenesData, assetsData, locationsData] = await Promise.all([
+                    fetchCSV(scenesCsvUrl),
+                    fetchCSV(assetsCsvUrl),
+                    fetchCSV(locationsCsvUrl)
+                ]);
+
+                // --- 1. PROCESS LOCATIONS ---
+                let locationsDone = 0;
+                let locationsReq = 0;
+                let totalLocations = 0;
+                let sceneWorldMap = {}; // Maps scene numbers to location status
+                let locHtml = "";
+
+                locationsData.forEach(row => {
+                    if(!row['World Name']) return;
+                    totalLocations++;
+                    
+                    let status = (row['Final Status'] || "").toLowerCase();
+                    let isDone = status === 'done' || status === 'approved' || status === 'ready' || status === 'cleared';
+                    let isWip = status === 'wip' || status === 'progress' || status === 'in progress';
+                    let isRew = status === 'rework' || status === 'feedback';
+
+                    if (isDone) locationsDone++;
+                    if (isDatePastOrToday(row['Final Status Date'])) locationsReq++;
+
+                    updatePieChart(row['Final Status']);
+
+                    let catColor = (row['Category'] || "").toLowerCase().includes("natural") ? "#2E5C2E" : "#8A2B2B";
+                    locHtml += `
+                    <tr>
+                        <td><strong>${row['World Name']}</strong></td>
+                        <td><span style="font-size: 11px; color:${catColor}; font-weight: bold;">${row['Category'] || "-"}</span></td>
+                        <td><span style="font-size: 10px; color: #888;">${row['Linked Scenes'] || "-"}</span></td>
+                        <td>${getBadgeHTML(row['References'], row['References Date'])}</td>
+                        <td>${getBadgeHTML(row['AI Asset'], row['AI Asset Date'])}</td>
+                        <td>${getBadgeHTML(row['3D Scaling'], row['3D Scaling Date'])}</td>
+                        <td>${getBadgeHTML(row['3D Details'], row['3D Details Date'])}</td>
+                        <td>${getBadgeHTML(row['Final Status'], row['Final Status Date'], true)}</td>
+                    </tr>`;
+
+                    // Auto-Link Locations to Scenes
+                    let linkedStr = row['Linked Scenes'] || "";
+                    let linkedScenes = linkedStr.match(/\d+/g) || [];
+                    linkedScenes.forEach(scNum => {
+                        let scId = parseInt(scNum, 10);
+                        if (!sceneWorldMap[scId]) sceneWorldMap[scId] = { total: 0, done: 0, wip: 0, rew: 0 };
+                        sceneWorldMap[scId].total++;
+                        if (isDone) sceneWorldMap[scId].done++;
+                        else if (isWip) sceneWorldMap[scId].wip++;
+                        else if (isRew) sceneWorldMap[scId].rew++;
+                    });
+                });
+
+                document.getElementById('locationsTableBody').innerHTML = locHtml || "<tr><td colspan='8'>No data found in Locations tab.</td></tr>";
+                document.getElementById('card-wd').innerText = `${locationsDone} / ${Math.max(totalLocations, 1)}`;
+                document.getElementById('target-wd').innerHTML = `Req: ${locationsReq} | ${getStatusText(locationsDone, locationsReq)}`;
+
+
+                // --- 2. PROCESS ASSETS ---
+                let assetsHtml = "";
+                assetsData.forEach(row => {
+                    if(!row['Asset Name']) return;
+                    updatePieChart(row['3D Asset Ready']);
+                    assetsHtml += `
+                    <tr>
+                        <td><strong>${row['Asset Name']}</strong></td>
+                        <td><span style="font-size: 11px; color:#666; font-weight: bold;">${row['Category'] || "-"}</span></td>
+                        <td><span style="font-size: 10px; color: #888;">${row['Linked Scenes'] || "-"}</span></td>
+                        <td>${getBadgeHTML(row['References'], row['References Date'])}</td>
+                        <td>${getBadgeHTML(row['Sketches'], row['Sketches Date'])}</td>
+                        <td>${getBadgeHTML(row['AI Asset'], row['AI Asset Date'])}</td>
+                        <td>${getBadgeHTML(row['3D Outsourced'], row['3D Outsourced Date'])}</td>
+                        <td>${getBadgeHTML(row['3D Asset Ready'], row['3D Asset Ready Date'], true)}</td>
+                    </tr>`;
+                });
+                document.getElementById('assetsTableBody').innerHTML = assetsHtml || "<tr><td colspan='8'>No data found in Assets tab.</td></tr>";
+
+
+                // --- 3. PROCESS SCENES ---
                 let scenesMap = {}; 
                 let currentSceneId = null;
                 
                 let counts = {
-                    sc: { done: 0, wip: 0, rew: 0 }, sb: { done: 0 }, wd: { done: 0 },
+                    sc: { done: 0, wip: 0, rew: 0 }, sb: { done: 0 }, 
                     st: { done: 0, wip: 0, rew: 0 }, mo: { done: 0, wip: 0, rew: 0 },
-                    as: { done: 0 }, mc: { done: 0 }, rc: { done: 0, wip: 0, rew: 0 }
+                    mc: { done: 0 }, rc: { done: 0, wip: 0, rew: 0 }
                 };
 
-                let req = { sb: 0, wd: 0, st: 0, mo: 0, mc: 0, rc: 0 };
-                
-                let totalScenes = 0;
-                let totalShots = 0;
+                let req = { sb: 0, st: 0, mo: 0, mc: 0, rc: 0 };
+                let totalScenes = 0, totalShots = 0;
 
-                results.data.forEach(row => {
+                scenesData.forEach(row => {
                     let scNum = (row['Scene Number'] || "").trim();
                     let shNum = (row['Shot Number'] || "").trim();
-
                     if (!scNum) return;
 
                     currentSceneId = 'scene_' + scNum.replace(/[^a-zA-Z0-9]/g, '');
 
-                    if (!scenesMap[currentSceneId]) {
-                        scenesMap[currentSceneId] = { sceneRow: null, shots: [] };
-                    }
+                    if (!scenesMap[currentSceneId]) scenesMap[currentSceneId] = { sceneRow: null, shots: [] };
 
                     if (!shNum) {
+                        // Apply Auto-Linked Location Status to the Scene's World Column
+                        let scNumInt = parseInt(scNum, 10);
+                        if (sceneWorldMap[scNumInt]) {
+                            let locStats = sceneWorldMap[scNumInt];
+                            if (locStats.done === locStats.total) row['World'] = "Done";
+                            else if (locStats.rew > 0) row['World'] = "Rework";
+                            else if (locStats.done > 0 || locStats.wip > 0) row['World'] = "WIP";
+                            else row['World'] = "Pending";
+                        }
+
                         scenesMap[currentSceneId].sceneRow = row;
                         totalScenes++;
                         
@@ -391,16 +472,13 @@
                         if(scStat === 'in prep') counts.sc.rew++;
 
                         if((row['Storyboard']||'').toLowerCase() === 'done') counts.sb.done++;
-                        if((row['World']||'').toLowerCase() === 'done') counts.wd.done++;
                         if((row['MoCap']||'').toLowerCase() === 'done') counts.mc.done++;
 
                         if(isDatePastOrToday(row['Storyboard Date'])) req.sb++;
-                        if(isDatePastOrToday(row['World Date'])) req.wd++;
                         if(isDatePastOrToday(row['MoCap Date'])) req.mc++;
                     } 
                     else {
                         if (!scenesMap[currentSceneId].sceneRow) scenesMap[currentSceneId].sceneRow = row;
-
                         scenesMap[currentSceneId].shots.push(row);
                         totalShots++;
 
@@ -426,15 +504,14 @@
                     }
                 });
 
-                let html = "";
+                let scenesHtml = "";
                 Object.keys(scenesMap).forEach(sceneId => {
                     let s = scenesMap[sceneId];
                     if(!s.sceneRow) return;
 
                     let expandBtn = s.shots.length > 0 ? `<button class="expand-btn">View ${s.shots.length} Shots ▼</button>` : '';
 
-                    // The Parent Row now auto-calculates Statics, Motion, 3D Assets, and Recompositing
-                    html += `
+                    scenesHtml += `
                     <tr class="parent-row" onclick="toggleShots('${sceneId}')">
                         <td><strong>Scene - ${s.sceneRow['Scene Number']}: ${s.sceneRow['Scene Name'] || ""}</strong> ${expandBtn}</td>
                         <td>${getBadgeHTML(s.sceneRow['Storyboard'], s.sceneRow['Storyboard Date'])}</td>
@@ -448,7 +525,7 @@
                     </tr>`;
 
                     s.shots.forEach(shot => {
-                        html += `
+                        scenesHtml += `
                         <tr class="shot-row ${sceneId}">
                             <td class="shot-indent">Shot ${shot['Shot Number']}</td>
                             <td><span style="color:#adb5bd;">-</span></td>
@@ -463,7 +540,7 @@
                     });
                 });
 
-                document.getElementById('tableBody').innerHTML = html || "<tr><td colspan='9'>No data found. Ensure your 'Scene Number' column is filled properly.</td></tr>";
+                document.getElementById('tableBody').innerHTML = scenesHtml || "<tr><td colspan='9'>No data found. Ensure your 'Scene Number' column is filled properly.</td></tr>";
 
                 document.getElementById('card-sc').innerText = `${counts.sc.done} / ${Math.max(totalScenes, 104)}`;
                 document.getElementById('mini-sc').innerHTML = `<span class="stat-pill pill-appr">✔ ${counts.sc.done}</span> <span class="stat-pill pill-wip">⏳ ${counts.sc.wip}</span> <span class="stat-pill pill-rew">↻ ${counts.sc.rew}</span>`;
@@ -471,9 +548,6 @@
                 document.getElementById('card-sb').innerText = `${counts.sb.done} / ${Math.max(totalScenes, 104)}`;
                 document.getElementById('target-sb').innerHTML = `Req: ${req.sb} | ${getStatusText(counts.sb.done, req.sb)}`;
                 
-                document.getElementById('card-wd').innerText = `${counts.wd.done} / ${Math.max(totalScenes, 104)}`;
-                document.getElementById('target-wd').innerHTML = `Req: ${req.wd} | ${getStatusText(counts.wd.done, req.wd)}`;
-
                 document.getElementById('card-mc').innerText = `${counts.mc.done} / ${Math.max(totalScenes, 104)}`;
                 document.getElementById('target-mc').innerHTML = `Req: ${req.mc} | ${getStatusText(counts.mc.done, req.mc)}`;
                 
@@ -493,60 +567,17 @@
                 document.getElementById('progress-bar').style.width = `${completionPercentage}%`;
                 document.getElementById('progress-text').innerText = `${completionPercentage}%`;
 
-                window.pipelineChart.data.datasets[0].data = [req.sb, req.wd, req.st, req.mo, req.mc, req.rc];
-                window.pipelineChart.data.datasets[1].data = [counts.sb.done, counts.wd.done, counts.st.done, counts.mo.done, counts.mc.done, counts.rc.done];
+                window.pipelineChart.data.datasets[0].data = [req.sb, locationsReq, req.st, req.mo, req.mc, req.rc];
+                window.pipelineChart.data.datasets[1].data = [counts.sb.done, locationsDone, counts.st.done, counts.mo.done, counts.mc.done, counts.rc.done];
                 window.pipelineChart.update();
-            }
-        });
 
-        // 2. Fetch Assets Data
-        Papa.parse(assetsCsvUrl, {
-            download: true, header: true,
-            complete: function(results) {
-                let html = "";
-                results.data.forEach(row => {
-                    if(!row['Asset Name']) return;
-                    updatePieChart(row['3D Asset Ready']);
-                    html += `
-                    <tr>
-                        <td><strong>${row['Asset Name']}</strong></td>
-                        <td><span style="font-size: 11px; color:#666; font-weight: bold;">${row['Category'] || "-"}</span></td>
-                        <td><span style="font-size: 10px; color: #888;">${row['Linked Scenes'] || "-"}</span></td>
-                        <td>${getBadgeHTML(row['References'], row['References Date'])}</td>
-                        <td>${getBadgeHTML(row['Sketches'], row['Sketches Date'])}</td>
-                        <td>${getBadgeHTML(row['AI Asset'], row['AI Asset Date'])}</td>
-                        <td>${getBadgeHTML(row['3D Outsourced'], row['3D Outsourced Date'])}</td>
-                        <td>${getBadgeHTML(row['3D Asset Ready'], row['3D Asset Ready Date'], true)}</td>
-                    </tr>`;
-                });
-                document.getElementById('assetsTableBody').innerHTML = html || "<tr><td colspan='8'>No data found in Assets tab.</td></tr>";
+            } catch (error) {
+                console.error("Error building dashboard:", error);
+                document.getElementById('tableBody').innerHTML = `<tr><td colspan='9' style='color:red;'>Error connecting to Google Sheets. Check links.</td></tr>`;
             }
-        });
+        }
 
-        // 3. Fetch Locations Data
-        Papa.parse(locationsCsvUrl, {
-            download: true, header: true,
-            complete: function(results) {
-                let html = "";
-                results.data.forEach(row => {
-                    if(!row['World Name']) return;
-                    updatePieChart(row['Final Status']);
-                    let catColor = (row['Category'] || "").toLowerCase().includes("natural") ? "#2E5C2E" : "#8A2B2B";
-                    html += `
-                    <tr>
-                        <td><strong>${row['World Name']}</strong></td>
-                        <td><span style="font-size: 11px; color:${catColor}; font-weight: bold;">${row['Category'] || "-"}</span></td>
-                        <td><span style="font-size: 10px; color: #888;">${row['Linked Scenes'] || "-"}</span></td>
-                        <td>${getBadgeHTML(row['References'], row['References Date'])}</td>
-                        <td>${getBadgeHTML(row['AI Asset'], row['AI Asset Date'])}</td>
-                        <td>${getBadgeHTML(row['3D Scaling'], row['3D Scaling Date'])}</td>
-                        <td>${getBadgeHTML(row['3D Details'], row['3D Details Date'])}</td>
-                        <td>${getBadgeHTML(row['Final Status'], row['Final Status Date'], true)}</td>
-                    </tr>`;
-                });
-                document.getElementById('locationsTableBody').innerHTML = html || "<tr><td colspan='8'>No data found in Locations tab.</td></tr>";
-            }
-        });
+        buildDashboard();
     </script>
 </body>
 </html>
